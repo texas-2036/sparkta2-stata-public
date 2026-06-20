@@ -78,11 +78,11 @@ Map {cmd:type()} values:
 {synopthdr}
 {synoptline}
 {syntab :Identification + geometry}
-{synopt :{cmd:id(}{it:varname}{cmd:)}}id variable. 5-digit county FIPS, 5-digit ZIP, 2-digit state FIPS, 11-digit tract GEOID, etc. Numeric ids are zero-padded to {cmd:idwidth()}.{p_end}
+{synopt :{cmd:id(}{it:varname}{cmd:)}}id variable. 5-digit county FIPS, 5-digit ZIP, 2-digit state FIPS, 11-digit tract GEOID, etc. Numeric ids are zero-padded to {cmd:idwidth()}; string ids are left as-is and only padded when shorter than {cmd:idwidth()}.{p_end}
 {synopt :{cmd:name(}{it:varname}{cmd:)}}display name for tooltips and the search box{p_end}
 {synopt :{cmd:geo(}{it:string}{cmd:)}}geography label; chooses {it:<geo>_counties.topojson}. Default {bf:texas}{p_end}
 {synopt :{cmd:layer(}{it:string}{cmd:)}}topojson object to render: {bf:counties} (default), {bf:states}, {bf:nation}, {bf:zctas}, {bf:tracts}, {bf:auto}{p_end}
-{synopt :{cmd:idwidth(}{it:#}{cmd:)}}zero-pad width for {cmd:id()} values; default 5{p_end}
+{synopt :{cmd:idwidth(}{it:#}{cmd:)}}zero-pad width for short {cmd:id()} values; default 5. Ids longer than this width are written verbatim — no truncation.{p_end}
 {synopt :{cmd:lat(}{it:varname}{cmd:)}}numeric latitude (required for {cmd:type(points)}; optional for {cmd:type(hexbin)}){p_end}
 {synopt :{cmd:lon(}{it:varname}{cmd:)}}numeric longitude{p_end}
 
@@ -202,14 +202,17 @@ aggregator; default {bf:mean}.
 numeric variable with a value label.  Pass {cmd:label define} + {cmd:label
 values} on your numeric region/category codes BEFORE calling sparkta2 —
 the dropdown shows the value label, not the raw number.  Without a value
-label, numeric codes are displayed as raw numbers.
+label, numeric codes are displayed as raw numbers.  Multi-word string
+values like {bf:"Middle / Jr. High"} are preserved as single dropdown
+entries (no whitespace tokenization).
 
 {phang}
 {bf:Sliders}{break}
 {cmd:sliders(varlist)} require numeric variables only.  The slider range is
 auto-set from the {cmd:summarize, meanonly} min/max; the data shouldn't
-have a single repeated value (span 0 collapses the slider).  Reasonable
-ranges produce reasonable bins.
+have a single repeated value (span 0 collapses the slider).  If the
+variable is fully missing on the active rows, the slider is skipped with a
+warning rather than emitting invalid JSON.
 
 {phang}
 {bf:Tooltipvars}{break}

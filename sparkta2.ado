@@ -1,4 +1,4 @@
-*! sparkta2 v0.5.2  2026-06-20
+*! sparkta2 v0.5.3  2026-06-20
 *! sparkta + interactive choropleth maps in one command.
 *!
 *! Dispatcher: type(map|bivariate|choropleth) -> sparkta2_map (bundled D3 engine)
@@ -16,7 +16,7 @@
 program define sparkta2
     version 17.0
 
-    local sparkta2_version "0.5.2"
+    local sparkta2_version "0.5.3"
     display as text "  [sparkta2 v`sparkta2_version']"
 
     * Peek at user-supplied type() without consuming any args.

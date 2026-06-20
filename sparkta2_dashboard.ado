@@ -123,7 +123,7 @@ program define sparkta2_dashboard, rclass
         file write `fh' `"</section>"' _n
     }
 
-    file write `fh' `"<footer>Built with sparkta2 v0.5.2 — each section is an independent interactive map.</footer>"' _n
+    file write `fh' `"<footer>Built with sparkta2 v0.5.3 — each section is an independent interactive map.</footer>"' _n
     file write `fh' `"</div></body></html>"' _n
     file close `fh'
 

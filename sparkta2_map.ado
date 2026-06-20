@@ -1,5 +1,14 @@
-*! sparkta2_map v0.4.0  2026-06-20
+*! sparkta2_map v0.5.3  2026-06-20
 *! Choropleth / bivariate / hexbin / points map renderer for sparkta2.
+*!
+*! v0.5.3 fixes:
+*!   - String id round-trip overflow: pad with explicit leading zeros instead
+*!     of real()->%0Wf, which collapses 9+ digit ids into scientific notation
+*!     (e.g. 199999999 -> " 2.0e+08") and breaks d3.index() in the engine.
+*!   - filters() values tokenized on whitespace because levelsof was called
+*!     with `clean` -- compound quotes preserved now.
+*!   - sliders() emitted Stata `.` for all-missing variables, producing
+*!     invalid JSON.  Missing min/max now write `null`.
 program define sparkta2_map, rclass
     version 17.0
 
@@ -138,7 +147,20 @@ program define sparkta2_map, rclass
         local _ctmp = subinstr("`counties'", "|", " ", .)
         local _ctmp = itrim("`_ctmp'")
         foreach _fc of local _ctmp {
-            local _fc_p : display %0`idwidth'.0f real("`_fc'")
+            * Mirror the row-loop padding logic exactly (see lines 175-210),
+            * so counties() list entries match the formatted row ids 1:1.
+            local _fc_p = "`_fc'"
+            if strlen("`_fc_p'") < `idwidth' {
+                capture local _rn = real("`_fc_p'")
+                if !_rc & "`_fc_p'" != "." & !missing(`_rn') {
+                    local _padlen = `idwidth' - strlen("`_fc_p'")
+                    local _zeros = ""
+                    forvalues _z = 1/`_padlen' {
+                        local _zeros = "0`_zeros'"
+                    }
+                    local _fc_p = "`_zeros'`_fc_p'"
+                }
+            }
             local _cty_keep_sp "`_cty_keep_sp' `_fc_p'"
         }
         local _cty_keep_sp = strtrim("`_cty_keep_sp'")
@@ -149,7 +171,19 @@ program define sparkta2_map, rclass
         local _ztmp = subinstr("`zoomto'", "|", " ", .)
         local _ztmp = itrim("`_ztmp'")
         foreach _fc of local _ztmp {
-            local _fc_p : display %0`idwidth'.0f real("`_fc'")
+            * Same padding rule as the counties() and row-loop paths.
+            local _fc_p = "`_fc'"
+            if strlen("`_fc_p'") < `idwidth' {
+                capture local _rn = real("`_fc_p'")
+                if !_rc & "`_fc_p'" != "." & !missing(`_rn') {
+                    local _padlen = `idwidth' - strlen("`_fc_p'")
+                    local _zeros = ""
+                    forvalues _z = 1/`_padlen' {
+                        local _zeros = "0`_zeros'"
+                    }
+                    local _fc_p = "`_zeros'`_fc_p'"
+                }
+            }
             if "`_zoomto_list'" == "" local _zoomto_list "`_fc_p'"
             else                       local _zoomto_list "`_zoomto_list'|`_fc_p'"
         }
@@ -172,20 +206,47 @@ program define sparkta2_map, rclass
     quietly {
         forvalues _i = 1/`=_N' {
             if !`touse'[`_i'] continue
-            * Build a padded string id matching idwidth
+            * Build a padded string id matching idwidth.
+            * Padding uses explicit leading-zero prefixing rather than the
+            * real()->display %0Wf round-trip: that idiom silently overflows
+            * to scientific notation (" 2.0e+08") for any numeric value past
+            * ~10^8, collapsing distinct 9-digit ids into one string and
+            * breaking d3.index() with duplicate-key errors downstream.
             if `_id_is_string' {
                 local _idraw = `id'[`_i']
                 local _fid = "`_idraw'"
-                * pad numerically if it's numeric-like
-                capture local _n = real("`_fid'")
-                if !_rc & "`_fid'" != "." {
-                    local _fid : display %0`idwidth'.0f real("`_fid'")
+                * Pad with leading zeros only if shorter than idwidth -- and
+                * only when the raw value is numeric-looking (FIPS-style).
+                * Already-padded or long string ids are written verbatim.
+                if strlen("`_fid'") < `idwidth' {
+                    capture local _rn = real("`_fid'")
+                    if !_rc & "`_fid'" != "." & !missing(`_rn') {
+                        local _padlen = `idwidth' - strlen("`_fid'")
+                        local _zeros = ""
+                        forvalues _z = 1/`_padlen' {
+                            local _zeros = "0`_zeros'"
+                        }
+                        local _fid = "`_zeros'`_fid'"
+                    }
                 }
             }
             else {
                 local _idnum = `id'[`_i']
                 if missing(`_idnum') continue
-                local _fid : display %0`idwidth'.0f `_idnum'
+                * Format with width 19 (max int64 digits) then strip the
+                * leading sign-padding spaces.  Avoids the `display %0Wf`
+                * scientific-notation overflow on values past ~10^8 that
+                * the legacy idiom triggered.
+                local _fid : display %19.0f `_idnum'
+                local _fid = strtrim("`_fid'")
+                if strlen("`_fid'") < `idwidth' {
+                    local _padlen = `idwidth' - strlen("`_fid'")
+                    local _zeros = ""
+                    forvalues _z = 1/`_padlen' {
+                        local _zeros = "0`_zeros'"
+                    }
+                    local _fid = "`_zeros'`_fid'"
+                }
             }
 
             if `_cty_keep_set' {
@@ -314,7 +375,10 @@ program define sparkta2_map, rclass
         if "`_lbl'" == "" local _lbl "`_fv'"
         local _lbl : subinstr local _lbl `"""' `"\""', all
         file write `rfh' `"{"var":"`_fv'","label":"`_lbl'","values":["'
-        quietly levelsof `_fv' if `touse', local(_levels) clean
+        * Drop the `clean' option: it strips the compound quotes that
+        * levelsof wraps multi-word string values in, so values like
+        * "Middle / Jr. High" survive as a single token through foreach.
+        quietly levelsof `_fv' if `touse', local(_levels)
         local _lvi 0
         foreach _lv of local _levels {
             if `_lvi' > 0 file write `rfh' ","
@@ -327,7 +391,7 @@ program define sparkta2_map, rclass
                 }
                 else local _disp "`_lv'"
             }
-            else local _disp "`_lv'"
+            else local _disp `"`_lv'"'
             local _disp : subinstr local _disp `"\"' `"\\"', all
             local _disp : subinstr local _disp `"""' `"\""', all
             file write `rfh' `""`_disp'""'
@@ -337,11 +401,18 @@ program define sparkta2_map, rclass
     file write `rfh' `"],"sliders":["'
     local _scount = 0
     foreach _sv of local slid_vars {
-        if `_scount' > 0 file write `rfh' ","
-        local ++_scount
         quietly summarize `_sv' if `touse', meanonly
         local _lo = r(min)
         local _hi = r(max)
+        * If the variable has no observed range (all-missing on `touse'),
+        * skip the slider rather than emit Stata's `.' as bare JSON (which
+        * would cause the JS parser to bail and the map to render blank).
+        if missing(`_lo') | missing(`_hi') {
+            display as txt "sparkta2: sliders(`_sv') has no observed range -- skipped"
+            continue
+        }
+        if `_scount' > 0 file write `rfh' ","
+        local ++_scount
         local _lbl : variable label `_sv'
         if "`_lbl'" == "" local _lbl "`_sv'"
         local _lbl : subinstr local _lbl `"""' `"\""', all
@@ -388,7 +459,7 @@ program define sparkta2_map, rclass
         bins(`bins')                                         ///
         width(`width') height(`height')
 
-    display as text _n "[sparkta2 v0.5.2]  `type' map written:"
+    display as text _n "[sparkta2 v0.5.3]  `type' map written:"
     display as text `"  {browse "`export'":`export'}"'
     display as text "  Rows: `_rows_written'  Geo: `geo'  Scheme: `scheme'  Mode: `mode'"
 
