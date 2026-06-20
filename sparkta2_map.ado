@@ -1,0 +1,403 @@
+*! sparkta2_map v0.4.0  2026-06-20
+*! Choropleth / bivariate / hexbin / points map renderer for sparkta2.
+program define sparkta2_map, rclass
+    version 17.0
+
+    syntax varlist(min=1 max=2 numeric) [if] [in], ID(varname) [  ///
+        TYPE(string)                                       ///  map | bivariate | choropleth | hexbin | points
+        NAME(varname)                                      ///  display name var
+        GEO(string)                                        ///  texas (default)
+        LAYer(string)                                      ///  topojson object: counties | states | nation | zctas | tracts | auto
+        IDWIdth(integer 5)                                 ///  zero-pad width for id() values (5 for FIPS, 2 for state FIPS)
+        BASEmap                                            ///  draw a faded outline layer behind the focused features
+        LATvar(varname numeric)                            ///  latitude variable (points/hexbin)
+        LONvar(varname numeric)                            ///  longitude variable (points/hexbin)
+        HEXRadius(integer 18)                              ///  hexagon radius in svg units (hexbin only)
+        HEXStat(string)                                    ///  hexbin aggregate: mean (default) | sum | median | count | min | max
+        POINTSIze(integer 4)                               ///  circle radius for points
+        SCHEME(string)                                     ///  rdbu | bupu | gnbu | puor | blues | reds | greens | viridis | ...
+        TITLE(string) SUBtitle(string) NOTE(string)        ///
+        XLABEL(string) YLABEL(string)                      ///
+        FILTERS(varlist)                                   ///  categorical filter dropdowns
+        SLIDERS(varlist numeric)                           ///  dual-handle range sliders
+        TOOLTIPvars(varlist)                               ///  extra fields shown in tooltip data table
+        COUNTies(string)                                   ///  pipe/space FIPS list to restrict to
+        ZOOMTo(string)                                     ///  pipe/space FIPS list -- auto-zoom on load
+        SEArch                                             ///  show name-search box
+        NOZoom                                             ///  disable pan/zoom + click-to-zoom
+        MODE(string)                                       ///  initial mode: bivariate | x | y | diff | ratio
+        MODES(string)                                      ///  allowed modes in toggle (pipe-sep)
+        COMParable                                         ///  declare x/y on comparable units
+        SWAPbutton                                         ///  show swap-axes button
+        DOWNload                                           ///  show PNG download button
+        MULTiples                                          ///  small-multiples: one panel per mode
+        BINS(integer 3)                                    ///  quantile bins per axis for bivariate
+        EXPORT(string) OFFLINE NOOPEN                      ///
+        WIDTH(integer 980) HEIGHT(integer 720)             ///
+    ]
+
+    marksample touse, novarlist
+
+    local nvar : word count `varlist'
+    local xvar : word 1 of `varlist'
+    local yvar : word 2 of `varlist'
+
+    if "`geo'" == ""    local geo "texas"
+    local geo = lower("`geo'")
+    if "`type'" == "" {
+        if `nvar' == 2 local type "bivariate"
+        else           local type "choropleth"
+    }
+    local type = lower("`type'")
+    if "`type'" == "map" {
+        if `nvar' == 2 local type "bivariate"
+        else           local type "choropleth"
+    }
+    if "`type'" == "univariate" local type "choropleth"
+
+    * type validation
+    local _valid_types "bivariate choropleth hexbin points"
+    if !`:list type in _valid_types' {
+        display as error "sparkta2: type(`type') not recognised."
+        display as error "  Valid: bivariate, choropleth, hexbin, points (or `map' as an auto-pick)."
+        exit 198
+    }
+
+    if "`type'" == "bivariate" & `nvar' != 2 {
+        display as error "sparkta2: type(bivariate) needs two numeric variables"
+        exit 198
+    }
+    if "`type'" == "choropleth" & `nvar' != 1 {
+        display as error "sparkta2: type(choropleth) needs one numeric variable"
+        exit 198
+    }
+    if "`type'" == "points" & ("`latvar'" == "" | "`lonvar'" == "") {
+        display as error "sparkta2: type(points) requires lat() and lon() variables"
+        exit 198
+    }
+    if "`hexstat'" != "" {
+        local _hs = lower("`hexstat'")
+        local _valid_hs "mean sum median count min max"
+        if !`:list _hs in _valid_hs' {
+            display as error "sparkta2: hexstat(`hexstat') not recognised (mean|sum|median|count|min|max)"
+            exit 198
+        }
+        local hexstat "`_hs'"
+    }
+    else local hexstat "mean"
+
+    if "`scheme'" == "" {
+        if "`type'" == "bivariate" local scheme "rdbu"
+        else                         local scheme "blues"
+    }
+    local scheme = lower("`scheme'")
+
+    if "`mode'" == "" local mode = cond("`type'" == "bivariate", "bivariate", "x")
+    local mode = lower("`mode'")
+
+    if "`modes'" == "" {
+        if "`type'" == "bivariate" {
+            local modes "bivariate|x|y|diff|ratio"
+        }
+        else local modes "x"
+    }
+
+    local is_offline    = cond("`offline'"    != "", 1, 0)
+    local is_swap       = cond("`swapbutton'" != "", 1, 0)
+    local is_download   = cond("`download'"   != "", 1, 0)
+    local is_comparable = cond("`comparable'" != "", 1, 0)
+    local is_multiples  = cond("`multiples'"  != "", 1, 0)
+    local is_zoom       = cond("`nozoom'"     != "", 0, 1)
+    local is_search     = cond("`search'"     != "", 1, 0)
+    local is_basemap    = cond("`basemap'"    != "", 1, 0)
+
+    if "`title'" == "" {
+        if "`type'" == "bivariate" local title "Bivariate map: `xvar' vs `yvar'"
+        else if "`type'" == "hexbin" local title "Hexbin: `xvar'"
+        else if "`type'" == "points" local title "Points: `xvar'"
+        else local title "Choropleth: `xvar'"
+    }
+
+    if "`layer'" != "" local layer = lower("`layer'")
+
+    quietly sparkta2_findfile, geo("`geo'")
+    local topopath  "`r(topopath)'"
+    local engpath   "`r(engpath)'"
+    local d3path    "`r(d3path)'"
+    local tcpath    "`r(tcpath)'"
+    local hxpath    "`r(hxpath)'"
+
+    if "`export'" == "" {
+        local export "`c(pwd)'/sparkta2_`type'_`geo'.html"
+    }
+
+    * Parse counties() and zoomto() FIPS lists.
+    local _cty_keep_sp ""
+    local _cty_keep_set 0
+    if "`counties'" != "" {
+        local _ctmp = subinstr("`counties'", "|", " ", .)
+        local _ctmp = itrim("`_ctmp'")
+        foreach _fc of local _ctmp {
+            local _fc_p : display %0`idwidth'.0f real("`_fc'")
+            local _cty_keep_sp "`_cty_keep_sp' `_fc_p'"
+        }
+        local _cty_keep_sp = strtrim("`_cty_keep_sp'")
+        local _cty_keep_set 1
+    }
+    local _zoomto_list ""
+    if "`zoomto'" != "" {
+        local _ztmp = subinstr("`zoomto'", "|", " ", .)
+        local _ztmp = itrim("`_ztmp'")
+        foreach _fc of local _ztmp {
+            local _fc_p : display %0`idwidth'.0f real("`_fc'")
+            if "`_zoomto_list'" == "" local _zoomto_list "`_fc_p'"
+            else                       local _zoomto_list "`_zoomto_list'|`_fc_p'"
+        }
+    }
+
+    tempfile rowjson
+    tempname rfh
+    file open `rfh' using "`rowjson'", write text replace
+
+    local filt_vars `"`filters'"'
+    local slid_vars `"`sliders'"'
+    local tip_vars  `"`tooltipvars'"'
+
+    * Determine if id var is string or numeric -- shapes the padding logic
+    capture confirm string variable `id'
+    local _id_is_string = (_rc == 0)
+
+    local _first 1
+    local _rows_written 0
+    quietly {
+        forvalues _i = 1/`=_N' {
+            if !`touse'[`_i'] continue
+            * Build a padded string id matching idwidth
+            if `_id_is_string' {
+                local _idraw = `id'[`_i']
+                local _fid = "`_idraw'"
+                * pad numerically if it's numeric-like
+                capture local _n = real("`_fid'")
+                if !_rc & "`_fid'" != "." {
+                    local _fid : display %0`idwidth'.0f real("`_fid'")
+                }
+            }
+            else {
+                local _idnum = `id'[`_i']
+                if missing(`_idnum') continue
+                local _fid : display %0`idwidth'.0f `_idnum'
+            }
+
+            if `_cty_keep_set' {
+                if !`:list _fid in _cty_keep_sp' continue
+            }
+
+            local _xv = `xvar'[`_i']
+            local _yv .
+            if "`yvar'" != "" local _yv = `yvar'[`_i']
+
+            local _nm "`_fid'"
+            if "`name'" != "" {
+                capture confirm string variable `name'
+                if !_rc {
+                    local _nm = `name'[`_i']
+                }
+                else {
+                    capture local _nm : display `name'[`_i']
+                }
+                if "`_nm'" == "" local _nm "`_fid'"
+            }
+            local _nm : subinstr local _nm `"\"' `"\\"', all
+            local _nm : subinstr local _nm `"""' `"\""', all
+
+            if `_first' local _first 0
+            else file write `rfh' "," _n
+
+            file write `rfh' "        {"
+            file write `rfh' `""id":"`_fid'""'
+            file write `rfh' `","name":"`_nm'""'
+
+            if missing(`_xv') file write `rfh' `","x":null"'
+            else              file write `rfh' `","x":"' (`_xv')
+
+            if "`yvar'" != "" {
+                if missing(`_yv') file write `rfh' `","y":null"'
+                else              file write `rfh' `","y":"' (`_yv')
+            }
+
+            if "`latvar'" != "" {
+                local _ltv = `latvar'[`_i']
+                if missing(`_ltv') file write `rfh' `","lat":null"'
+                else                file write `rfh' `","lat":"' (`_ltv')
+            }
+            if "`lonvar'" != "" {
+                local _lnv = `lonvar'[`_i']
+                if missing(`_lnv') file write `rfh' `","lon":null"'
+                else                file write `rfh' `","lon":"' (`_lnv')
+            }
+
+            foreach _fv of local filt_vars {
+                local _val ""
+                capture confirm string variable `_fv'
+                if !_rc {
+                    local _val = `_fv'[`_i']
+                }
+                else {
+                    local _lab : value label `_fv'
+                    local _num = `_fv'[`_i']
+                    if "`_lab'" != "" & !missing(`_num') {
+                        local _val : label `_lab' `_num'
+                    }
+                    else if missing(`_num') {
+                        local _val ""
+                    }
+                    else {
+                        local _val = strofreal(`_num')
+                    }
+                }
+                local _val : subinstr local _val `"\"' `"\\"', all
+                local _val : subinstr local _val `"""' `"\""', all
+                file write `rfh' `","f__`_fv'":"`_val'""'
+            }
+            foreach _sv of local slid_vars {
+                local _snum = `_sv'[`_i']
+                if missing(`_snum') file write `rfh' `","s__`_sv'":null"'
+                else                file write `rfh' `","s__`_sv'":"' (`_snum')
+            }
+            foreach _tv of local tip_vars {
+                capture confirm string variable `_tv'
+                local _isstr = (_rc == 0)
+                if `_isstr' {
+                    local _tval = `_tv'[`_i']
+                    local _tval : subinstr local _tval `"\"' `"\\"', all
+                    local _tval : subinstr local _tval `"""' `"\""', all
+                    file write `rfh' `","t__`_tv'":"`_tval'""'
+                }
+                else {
+                    local _tnum = `_tv'[`_i']
+                    local _tlab : value label `_tv'
+                    if "`_tlab'" != "" & !missing(`_tnum') {
+                        local _tdsp : label `_tlab' `_tnum'
+                        local _tdsp : subinstr local _tdsp `"\"' `"\\"', all
+                        local _tdsp : subinstr local _tdsp `"""' `"\""', all
+                        file write `rfh' `","t__`_tv'":"`_tdsp'""'
+                    }
+                    else if missing(`_tnum') {
+                        file write `rfh' `","t__`_tv'":null"'
+                    }
+                    else {
+                        file write `rfh' `","t__`_tv'":"' (`_tnum')
+                    }
+                }
+            }
+
+            file write `rfh' "}" _n
+            local ++_rows_written
+        }
+    }
+    file close `rfh'
+
+    if `_rows_written' == 0 {
+        display as error "sparkta2: no rows to plot (check [if]/[in], counties(), or filter expressions)"
+        exit 459
+    }
+
+    tempfile metajson
+    file open `rfh' using "`metajson'", write text replace
+    file write `rfh' "{"
+    file write `rfh' `""filters":["'
+    local _fcount = 0
+    foreach _fv of local filt_vars {
+        if `_fcount' > 0 file write `rfh' ","
+        local ++_fcount
+        local _lbl : variable label `_fv'
+        if "`_lbl'" == "" local _lbl "`_fv'"
+        local _lbl : subinstr local _lbl `"""' `"\""', all
+        file write `rfh' `"{"var":"`_fv'","label":"`_lbl'","values":["'
+        quietly levelsof `_fv' if `touse', local(_levels) clean
+        local _lvi 0
+        foreach _lv of local _levels {
+            if `_lvi' > 0 file write `rfh' ","
+            local ++_lvi
+            capture confirm string variable `_fv'
+            if _rc {
+                local _lab : value label `_fv'
+                if "`_lab'" != "" {
+                    local _disp : label `_lab' `_lv'
+                }
+                else local _disp "`_lv'"
+            }
+            else local _disp "`_lv'"
+            local _disp : subinstr local _disp `"\"' `"\\"', all
+            local _disp : subinstr local _disp `"""' `"\""', all
+            file write `rfh' `""`_disp'""'
+        }
+        file write `rfh' "]}"
+    }
+    file write `rfh' `"],"sliders":["'
+    local _scount = 0
+    foreach _sv of local slid_vars {
+        if `_scount' > 0 file write `rfh' ","
+        local ++_scount
+        quietly summarize `_sv' if `touse', meanonly
+        local _lo = r(min)
+        local _hi = r(max)
+        local _lbl : variable label `_sv'
+        if "`_lbl'" == "" local _lbl "`_sv'"
+        local _lbl : subinstr local _lbl `"""' `"\""', all
+        file write `rfh' `"{"var":"`_sv'","label":"`_lbl'","min":"' (`_lo') `","max":"' (`_hi') `"}"'
+    }
+    file write `rfh' `"],"tooltipvars":["'
+    local _tcount = 0
+    foreach _tv of local tip_vars {
+        if `_tcount' > 0 file write `rfh' ","
+        local ++_tcount
+        local _lbl : variable label `_tv'
+        if "`_lbl'" == "" local _lbl "`_tv'"
+        local _lbl : subinstr local _lbl `"""' `"\""', all
+        capture confirm numeric variable `_tv'
+        local _isnum = (_rc == 0)
+        local _tlabname : value label `_tv'
+        local _numfmt = cond(`_isnum' & "`_tlabname'" == "", 1, 0)
+        file write `rfh' `"{"var":"`_tv'","label":"`_lbl'","numeric":`_numfmt'}"'
+    }
+    file write `rfh' "]}"
+    file close `rfh'
+
+    sparkta2_writehtml,                                    ///
+        topopath("`topopath'") engpath("`engpath'")         ///
+        d3path("`d3path'") tcpath("`tcpath'")               ///
+        hxpath("`hxpath'")                                  ///
+        rowjson("`rowjson'") metajson("`metajson'")         ///
+        export(`"`export'"') isoffline(`is_offline')        ///
+        type("`type'") scheme("`scheme'") title(`"`title'"') ///
+        geo("`geo'") layer("`layer'")                       ///
+        idwidth(`idwidth')                                  ///
+        hexradius(`hexradius') hexstat("`hexstat'")         ///
+        pointsize(`pointsize')                              ///
+        latvar("`latvar'") lonvar("`lonvar'")               ///
+        subtitle(`"`subtitle'"') note(`"`note'"')           ///
+        xlabel(`"`xlabel'"') ylabel(`"`ylabel'"')           ///
+        xvar("`xvar'") yvar("`yvar'")                       ///
+        mode("`mode'") modes("`modes'")                     ///
+        zoomto("`_zoomto_list'")                            ///
+        isswap(`is_swap') isdownload(`is_download')         ///
+        iscomparable(`is_comparable') ismultiples(`is_multiples') ///
+        iszoom(`is_zoom') issearch(`is_search')             ///
+        isbasemap(`is_basemap')                             ///
+        bins(`bins')                                         ///
+        width(`width') height(`height')
+
+    display as text _n "[sparkta2 v0.5.2]  `type' map written:"
+    display as text `"  {browse "`export'":`export'}"'
+    display as text "  Rows: `_rows_written'  Geo: `geo'  Scheme: `scheme'  Mode: `mode'"
+
+    return local export "`export'"
+    return local type   "`type'"
+    return local geo    "`geo'"
+    return scalar n_rows = `_rows_written'
+
+    if "`noopen'" == "" {
+        sparkta2_open, file(`"`export'"')
+    }
+end
