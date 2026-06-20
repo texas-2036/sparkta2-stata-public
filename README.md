@@ -8,6 +8,8 @@ Map design borrows from Mike Bostock's Observable notebooks ([d3/bivariate-choro
 
 ## Status
 
+Live version demo gallery here: https://ericabooth.github.io/Sparkta2_Example_Site/
+
 v0.5.0. Two bundled Texas geographies: 254 counties (with 56 US states + nation as backdrop layers) and 1,018 NCES EDGE SY2024-25 school districts. The engine also accepts any TopoJSON or GeoJSON FeatureCollection you drop next to the ado files.
 
 ### What's new in v0.5.0
